@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Mixins and solutions</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+    <style type="text/css">
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+
+      body { font-family: 'Droid Serif'; }
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: normal;
+      }
+      .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+      .remark-slides-area, .remark-slide,  .remark-slide-scaler, .remark-slide-content {
+        background: #92B686;
+      }
+      .remark-slide-scaler {
+      box-shadow: none;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+
+class: center, middle
+
+# Mixins and Django way
+
+---
+
+# Agenda
+
+1. The problem
+2. Quick way out
+3. Better way out
+4. The Way out
+5. What would Chuck Norris say?
+6. QA
+
+---
+
+## The problem
+
+```#!python
+class ContactMixin(object):
+    def dispatch(self, request, *args, **kwargs):
+        # Fetch contact from somewhere...
+        `self.contact` = ...
+
+        return super(ContactMixin, self).dispatch(request, *args, **kwargs)
+
+class ContactExtraMixin(object):
+    def dispatch(self, request, *args, **kwargs):
+        # Fetch contact from somewhere...
+        `self.contact`['extra'] = ...
+
+        return super(ContactMixin, self).dispatch(request, *args, **kwargs)
+
+
+```
+
+### And the view
+
+```#!python
+class HomePageView(ContactMixin, ContactExtraMixin, View):
+
+    def dispatch(self, request, *args, **kwargs):
+        if `self.contact`.get('extra', None) is None:
+        ...
+        return super(HomePageView, self).dispatch(request, *args, **kwargs)
+```
+---
+
+# Woohoo! We've got an error!
+
+```#!python
+AttributeError at 'HomePageView' object has no attribute 'contact'
+...
+```
+
+All's well dude, just call `super()` before accessing `contact`.
+
+### But that's not gonna work.
+
+---
+
+class: center, middle
+
+# Quick way out
+
+A bit of magic and little changes to go.
+
+---
+
+## The mixin
+
+```#!python
+class ContactMixin(object):
+    _contact = None
+
+    @property
+    def contact(self):
+        if self._contact is None:
+            self._contact = ...
+        return self._contact
+
+class ContactExtraMixin(object):
+
+    @property
+    def contact(self):
+        original = super(TestRequiredMixin, self).contact
+        original['extra'] = 'YO'
+        return original
+```
+
+## The view
+
+View stays same, easy right?
+
+---
+
+# What we've got:
+
+- Proper OO style data getter
+- Quick win
+
+# What's still there:
+
+- Data that belongs to request assigned to view
+- ACL logic still resides in `dispatch` method
+- Not a django way
+
+# Potential issues:
+
+- Concact checks may be skipped leading to security issues etc.
+
+---
+
+class: center, middle
+
+# Better way out
+
+Includes `BetterView`, yay!
+
+---
+
+# The mixin, or not a mixin anymore.
+
+```#!python
+class ContactMixin(object):
+
+    @classmethod
+    def `pre_dispatch`(cls, request):
+        if not hasattr(request, 'contact'):
+            `request.contact` = ...
+```
+
+---
+
+# The view
+
+## View gets extra `Meta` class
+
+```#!python
+class HomePageView(`BetterView`):
+    class Meta:
+        pre_dispatchers = [
+            `ContactMixin`,
+        ]
+
+    def `pre_dispatch`(self, request):
+        if `request.contact`.get('extra', None) is None:
+            raise Exception("No extra in contact!")
+
+```
+
+## And extended from some strange *BetterView* ?!
+
+---
+
+# Magic BetterView
+
+```#!python
+class BetterView(View):
+    def dispatch(self, request, *args, **kwargs):
+        # Extended dispatch method acts as middleware caller
+        meta = getattr(self, 'Meta', None)
+
+        # Check out if class has `Meta.pre_dispatchers`
+        if meta is not None and hasattr(meta, 'pre_dispatchers'):
+            for dispatcher in meta.pre_dispatchers:
+                response = `dispatcher.pre_dispatch`(request)
+
+                if response is not None:
+                    return response
+
+        if hasattr(self, 'pre_dispatch'):
+            response = `self.pre_dispatch`(request)
+            if response is not None:
+                return response
+
+        return super(BetterView, self).dispatch(request, *args, **kwargs)
+```
+
+---
+
+# What we've got:
+
+- Data no longer resides in classes and belongs to request
+- Flow control becomes clear
+- Mixins (or not a mixins anymore) can alter request only
+- 2 levels of extention: `Meta.pre_dispatchers` and `self.pre_dispatch`
+
+# What's still there:
+
+- Every view will need tons of `pre_dispatchers` to be defined
+- Not entirely django way
+
+# Potential issues:
+
+- Concact checks may be skipped leading to security issues etc.
+
+---
+
+class: center, middle
+
+# The Way
+
+Warning! Black magic inside.
+
+---
+
+# The Middleware
+
+```#!python
+class ContactMiddleware(object):
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        module_name = view_func.__module__.split('.')[0]
+        if module_name not in settings.`CONTACT_MIDDLEWARE_MODULES`:
+            return None
+
+        if not hasattr(request, 'contact'):
+            `request.contact` = ...
+
+        if not request.contact.get('active', False):
+            raise Exception('Unauthorized')
+```
+
+## Settings
+
+```#!python
+CONTACT_MIDDLEWARE_MODULES = (
+    'the_way',
+)
+```
+
+---
+
+# The ~~mixin~~ Mixinwares (permissions layers)!
+
+```#!python
+class ContactRequiredMixin(object):
+
+    `@classmethod`
+    def pre_dispatch(self, request):
+        if not hasattr(request, 'contact'):
+            raise Exception('Unauthorized')
+
+
+class ContactExtraMixin(object):
+
+    @classmethod
+    def `pre_dispatch`(self, request):
+        if request.contact.get('extra', None) is None:
+            raise Exception("No extra in contact!")
+        request.contact['extra'] = 'yo, dude'
+```
+
+---
+
+# The view
+
+```#!python
+class HomePageView(View):
+    class `Meta`:
+        `pre_dispatchers` = [
+            ContactRequiredMixin,
+            ContactExtraMixin,
+        ]
+
+    def get(self, request, *args, **kwargs):
+        return HttpResponse(...)
+```
+
+---
+
+# The magic middleware
+
+```#!python
+class ViewWithExtrasMiddleware(object):
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        `view_class` = get_class(view_func)
+        meta = getattr(view_class, 'Meta', None)
+        if meta is not None and hasattr(meta, `'pre_dispatchers'`):
+            for cls in `meta.pre_dispatchers`:
+                response = cls.`pre_dispatch`(request)
+                if response is not None:
+                    return response
+```
+
+
+---
+
+# What we've got:
+
+- Data no longer resides in classes and belongs to request
+- Flow control becomes clear
+- Mixins (or not a mixins anymore) can alter request only
+- Middlewares used to do data assignment and sanity checks on wide range of views
+- Mixinwares used to do request pre-processing, can be assigned on view level
+- Django way
+
+# Potential issues:
+
+- Complex beast, but pretty much explicit.
+
+---
+
+class: center, middle
+
+# Questions?
+
+    </textarea>
+    <script src="https://gnab.github.io/remark/downloads/remark-latest.min.js">
+    </script>
+    <script>
+      var slideshow = remark.create();
+    </script>
+  </body>
